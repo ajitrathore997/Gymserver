@@ -20,6 +20,13 @@ const getEndDate = (startDate, duration) => {
   return endDate;
 };
 
+const addMonths = (date, months) => {
+  const next = new Date(date);
+  if (Number.isNaN(next.getTime())) return null;
+  next.setMonth(next.getMonth() + months);
+  return next;
+};
+
 const getActorFromRequest = async (req) => {
   if (!req?.user?._id) return { id: null, name: "System" };
   const user = await User.findById(req.user._id).select("name");
@@ -29,16 +36,227 @@ const getActorFromRequest = async (req) => {
   };
 };
 
+const buildCycle = (startDate, cycleMonths, fee) => {
+  const endDate = addMonths(startDate, cycleMonths);
+  return {
+    startDate,
+    endDate,
+    cycleMonths,
+    fee,
+    paidAmount: 0,
+    remainingAmount: Math.max(fee - 0, 0),
+    status: fee === 0 ? "Paid" : "Pending",
+    payments: [],
+  };
+};
+
+const ensurePaymentCycles = (member) => {
+  const cycles = Array.isArray(member.paymentCycles)
+    ? member.paymentCycles
+    : [];
+  const cycleMonths = getDurationMonths(member.duration);
+  const fee = Number(member.fee || 0);
+  const now = new Date();
+
+  if (cycles.length === 0) {
+    const start = member.startDate ? new Date(member.startDate) : now;
+    cycles.push(buildCycle(start, cycleMonths, fee));
+  }
+
+  let last = cycles[cycles.length - 1];
+  if (!last.endDate) {
+    last.endDate = addMonths(last.startDate, last.cycleMonths || cycleMonths);
+  }
+
+  while (last.endDate && last.endDate < now) {
+    const nextStart = new Date(last.endDate);
+    const next = buildCycle(nextStart, cycleMonths, fee);
+    cycles.push(next);
+    last = next;
+  }
+
+  member.paymentCycles = cycles;
+};
+
+const applyPaymentToCycles = (member, amount, actor, note, at, type = "payment") => {
+  let remaining = Number(amount || 0);
+  if (remaining === 0) return { applied: 0, allocations: [] };
+  const allocations = [];
+  const cycles = member.paymentCycles || [];
+  const cycleMonths = getDurationMonths(member.duration);
+  const fee = Number(member.fee || 0);
+
+  let index = 0;
+  while (remaining > 0) {
+    const cycle = cycles[index];
+    if (!cycle) {
+      const last = cycles[cycles.length - 1];
+      const nextStart = last?.endDate ? new Date(last.endDate) : new Date();
+      cycles.push(buildCycle(nextStart, cycleMonths, fee));
+      continue;
+    }
+
+    if (cycle.remainingAmount <= 0) {
+      index += 1;
+      continue;
+    }
+
+    const applied = Math.min(cycle.remainingAmount, remaining);
+    cycle.paidAmount += applied;
+    cycle.remainingAmount -= applied;
+    cycle.status = cycle.remainingAmount === 0 ? "Paid" : "Pending";
+    cycle.payments.push({
+      amount: applied,
+      type,
+      by: actor,
+      at,
+      note,
+    });
+    allocations.push({
+      startDate: cycle.startDate,
+      endDate: cycle.endDate,
+      amount: applied,
+    });
+    remaining -= applied;
+    if (cycle.remainingAmount <= 0) {
+      index += 1;
+    }
+  }
+
+  return { applied: Number(amount || 0) - remaining, allocations };
+};
+
+const applyAdjustmentToCurrentCycle = (member, amount, actor, note, at) => {
+  const cycles = member.paymentCycles || [];
+  const current = cycles[cycles.length - 1];
+  if (!current || amount === 0) return;
+  const adjust = Math.min(current.paidAmount, Math.abs(amount));
+  current.paidAmount -= adjust;
+  current.remainingAmount = Math.max(current.fee - current.paidAmount, 0);
+  current.status = current.remainingAmount === 0 ? "Paid" : "Pending";
+  current.payments.push({
+    amount: -adjust,
+    type: "adjustment",
+    by: actor,
+    at,
+    note,
+  });
+};
+
+const adjustPaymentHistoryEntry = (member, historyIndex, newAmount, actor, note) => {
+  if (!Array.isArray(member.paymentHistory)) {
+    throw new Error("Payment history not available");
+  }
+  const entry = member.paymentHistory[historyIndex];
+  if (!entry) {
+    throw new Error("Payment history entry not found");
+  }
+  if (entry.type !== "payment") {
+    throw new Error("Only payment entries can be adjusted");
+  }
+  const oldAmount = Number(entry.amount || 0);
+  const targetAmount = Number(newAmount || 0);
+  const delta = targetAmount - oldAmount;
+  if (delta === 0) return { delta: 0, allocations: [] };
+
+  const allocations = Array.isArray(entry.allocations) ? entry.allocations : [];
+  if (allocations.length === 0) {
+    throw new Error("Cannot adjust payment without allocations");
+  }
+
+  let remaining = delta;
+  const cycleAdjustments = [];
+
+  for (const alloc of allocations) {
+    if (remaining === 0) break;
+    const cycle = (member.paymentCycles || []).find((c) => {
+      return (
+        c.startDate &&
+        c.endDate &&
+        new Date(c.startDate).getTime() === new Date(alloc.startDate).getTime() &&
+        new Date(c.endDate).getTime() === new Date(alloc.endDate).getTime()
+      );
+    });
+    if (!cycle) continue;
+
+    if (remaining > 0) {
+      const add = Math.min(Number(cycle.remainingAmount || 0), remaining);
+      if (add > 0) {
+        cycle.paidAmount += add;
+        cycle.remainingAmount -= add;
+        cycle.status = cycle.remainingAmount === 0 ? "Paid" : "Pending";
+        cycle.payments.push({
+          amount: add,
+          type: "adjustment",
+          by: actor,
+          at: new Date(),
+          note,
+        });
+        cycleAdjustments.push({
+          startDate: cycle.startDate,
+          endDate: cycle.endDate,
+          amount: add,
+        });
+        remaining -= add;
+      }
+    } else {
+      const reduce = Math.min(Number(cycle.paidAmount || 0), Math.abs(remaining));
+      if (reduce > 0) {
+        cycle.paidAmount -= reduce;
+        cycle.remainingAmount = Math.max(cycle.fee - cycle.paidAmount, 0);
+        cycle.status = cycle.remainingAmount === 0 ? "Paid" : "Pending";
+        cycle.payments.push({
+          amount: -reduce,
+          type: "adjustment",
+          by: actor,
+          at: new Date(),
+          note,
+        });
+        cycleAdjustments.push({
+          startDate: cycle.startDate,
+          endDate: cycle.endDate,
+          amount: -reduce,
+        });
+        remaining += reduce;
+      }
+    }
+  }
+
+  if (remaining !== 0) {
+    throw new Error("Cannot apply adjustment due to cycle limits");
+  }
+
+  entry.amount = targetAmount;
+
+  return { delta, allocations: cycleAdjustments };
+};
+
+const syncMemberPaymentSummary = (member) => {
+  const cycles = member.paymentCycles || [];
+  const current = cycles.length ? cycles[cycles.length - 1] : null;
+  const totalRemaining = cycles.reduce(
+    (sum, c) => sum + Number(c.remainingAmount || 0),
+    0
+  );
+  if (current) {
+    member.paidAmount = Number(current.paidAmount || 0);
+  }
+  member.remainingAmount = totalRemaining;
+  member.paymentStatus =
+    member.paymentStatus === "Free Trial" && Number(member.fee || 0) === 0
+      ? "Free Trial"
+      : totalRemaining === 0
+      ? "Paid"
+      : "Pending";
+};
+
 const createMemberController = async (req, res) => {
   try {
     const fee = Number(req.body.fee || 0);
     const paidAmount = Number(req.body.paidAmount || 0);
-    const remainingAmount = Math.max(fee - paidAmount, 0);
     const paymentStatus =
       req.body.paymentStatus === "Free Trial" && fee === 0
         ? "Free Trial"
-        : remainingAmount === 0
-        ? "Paid"
         : "Pending";
 
     const actor = await getActorFromRequest(req);
@@ -49,33 +267,52 @@ const createMemberController = async (req, res) => {
       changes: {
         fee,
         paidAmount,
-        remainingAmount,
         paymentStatus,
       },
     };
 
-    const paymentEntry = {
-      amount: paidAmount,
-      fee,
-      paidAmount,
-      remainingAmount,
-      paymentStatus,
-      by: actor,
-      at: new Date(),
-      note: req.body.paymentNote,
-    };
-
-    const member = await new Member({
+    const member = new Member({
       ...req.body,
       fee,
-      paidAmount,
-      remainingAmount,
       paymentStatus,
       createdBy: actor,
       updatedBy: actor,
       activityHistory: [activityEntry],
-      paymentHistory: paidAmount > 0 ? [paymentEntry] : [],
-    }).save();
+      paymentHistory: [],
+      paymentCycles: [],
+    });
+
+    ensurePaymentCycles(member);
+
+    let appliedOnCreate = null;
+    if (paidAmount > 0) {
+      appliedOnCreate = applyPaymentToCycles(
+        member,
+        paidAmount,
+        actor,
+        req.body.paymentNote,
+        new Date()
+      );
+    }
+
+    syncMemberPaymentSummary(member);
+
+    if (appliedOnCreate?.applied > 0) {
+      member.paymentHistory.push({
+        amount: paidAmount,
+        type: "payment",
+        fee,
+        paidAmount: member.paidAmount,
+        remainingAmount: member.remainingAmount,
+        paymentStatus: member.paymentStatus,
+        by: actor,
+        at: new Date(),
+        note: req.body.paymentNote,
+        allocations: appliedOnCreate.allocations,
+      });
+    }
+
+    await member.save();
     return res.status(201).json({
       success: true,
       message: "Member created successfully",
@@ -186,20 +423,25 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
     const limitNum = Math.min(Math.max(Number(limit) || 20, 1), 100);
     const skip = (pageNum - 1) * limitNum;
 
-    console.log("Query:", query);
+    // console.log("Query:", query);
     const [members, total] = await Promise.all([
       Member.find(query).sort(sort).skip(skip).limit(limitNum),
       Member.countDocuments(query),
     ]);
 
-    const membersWithPayments = members.map((m) => {
+    const membersWithPayments = await Promise.all(members.map(async (m) => {
+      ensurePaymentCycles(m);
+      syncMemberPaymentSummary(m);
+      if (m.isModified()) {
+        await m.save();
+      }
       const obj = m.toObject();
       const history = Array.isArray(obj.paymentHistory)
         ? obj.paymentHistory
         : [];
       const lastPayment = history.length ? history[history.length - 1] : null;
       return { ...obj, lastPayment };
-    });
+    }));
 
     return res.status(200).json({
       success: true,
@@ -228,7 +470,21 @@ const getMemberByIdController = async (req, res) => {
         message: "Member not found",
       });
     }
-    return res.status(200).json({ success: true, member });
+    ensurePaymentCycles(member);
+    syncMemberPaymentSummary(member);
+    await member.save();
+    const cycles = member.paymentCycles || [];
+    const currentCycle = cycles.length ? cycles[cycles.length - 1] : null;
+    const totalOutstanding = cycles.reduce(
+      (sum, c) => sum + Number(c.remainingAmount || 0),
+      0
+    );
+    return res.status(200).json({
+      success: true,
+      member,
+      currentCycle,
+      totalOutstanding,
+    });
   } catch (error) {
     console.error("Error getting member:", error);
     return res.status(500).json({
@@ -241,8 +497,8 @@ const getMemberByIdController = async (req, res) => {
 
 const updateMemberController = async (req, res) => {
   try {
-    const existingMember = await Member.findById(req.params.id);
-    if (!existingMember) {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
       return res.status(404).json({
         success: false,
         message: "Member not found",
@@ -250,20 +506,18 @@ const updateMemberController = async (req, res) => {
     }
 
     const fee =
-      req.body.fee !== undefined ? Number(req.body.fee) : existingMember.fee;
-    const paidAmount =
-      req.body.paidAmount !== undefined
-        ? Number(req.body.paidAmount)
-        : existingMember.paidAmount;
-    const remainingAmount = Math.max(fee - paidAmount, 0);
-    const paymentStatus =
-      req.body.paymentStatus === "Free Trial" && fee === 0
-        ? "Free Trial"
-        : remainingAmount === 0
-        ? "Paid"
-        : "Pending";
+      req.body.fee !== undefined ? Number(req.body.fee) : member.fee;
 
     const actor = await getActorFromRequest(req);
+
+    ensurePaymentCycles(member);
+
+    const cycles = member.paymentCycles || [];
+    const currentCycle = cycles.length ? cycles[cycles.length - 1] : null;
+    const existingPaid = currentCycle ? Number(currentCycle.paidAmount || 0) : 0;
+    const desiredPaid =
+      req.body.paidAmount !== undefined ? Number(req.body.paidAmount) : existingPaid;
+    const paymentDelta = desiredPaid - existingPaid;
 
     const diff = {};
     const addIfChanged = (field, oldValue, newValue, skipIfUndefined = true) => {
@@ -277,40 +531,28 @@ const updateMemberController = async (req, res) => {
       }
     };
 
-    addIfChanged("name", existingMember.name, req.body.name);
-    addIfChanged("email", existingMember.email, req.body.email);
-    addIfChanged("phone", existingMember.phone, req.body.phone);
+    addIfChanged("name", member.name, req.body.name);
+    addIfChanged("email", member.email, req.body.email);
+    addIfChanged("phone", member.phone, req.body.phone);
     addIfChanged(
       "membershipType",
-      existingMember.membershipType,
+      member.membershipType,
       req.body.membershipType
     );
-    addIfChanged("startDate", existingMember.startDate, req.body.startDate);
-    addIfChanged("duration", existingMember.duration, req.body.duration);
+    addIfChanged("startDate", member.startDate, req.body.startDate);
+    addIfChanged("duration", member.duration, req.body.duration);
     addIfChanged(
       "personalTrainer",
-      existingMember.personalTrainer,
+      member.personalTrainer,
       req.body.personalTrainer
     );
     addIfChanged(
       "assignedTrainer",
-      existingMember.assignedTrainer,
+      member.assignedTrainer,
       req.body.assignedTrainer
     );
-    addIfChanged("fee", existingMember.fee, fee, false);
-    addIfChanged("paidAmount", existingMember.paidAmount, paidAmount, false);
-    addIfChanged(
-      "remainingAmount",
-      existingMember.remainingAmount,
-      remainingAmount,
-      false
-    );
-    addIfChanged(
-      "paymentStatus",
-      existingMember.paymentStatus,
-      paymentStatus,
-      false
-    );
+    addIfChanged("fee", member.fee, fee, false);
+    addIfChanged("paidAmount", existingPaid, desiredPaid, false);
 
     const activityEntry = Object.keys(diff).length
       ? {
@@ -321,47 +563,100 @@ const updateMemberController = async (req, res) => {
         }
       : null;
 
-    const paymentDelta =
-      paidAmount - Number(existingMember.paidAmount || 0);
-    const paymentChanged =
-      fee !== existingMember.fee ||
-      paidAmount !== existingMember.paidAmount ||
-      paymentStatus !== existingMember.paymentStatus ||
-      remainingAmount !== existingMember.remainingAmount;
+    if (req.body.startDate !== undefined) member.startDate = req.body.startDate;
+    if (req.body.duration !== undefined) member.duration = req.body.duration;
+    if (req.body.membershipType !== undefined)
+      member.membershipType = req.body.membershipType;
+    if (req.body.personalTrainer !== undefined)
+      member.personalTrainer = req.body.personalTrainer;
+    if (req.body.assignedTrainer !== undefined)
+      member.assignedTrainer = req.body.assignedTrainer;
+    if (req.body.name !== undefined) member.name = req.body.name;
+    if (req.body.email !== undefined) member.email = req.body.email;
+    if (req.body.phone !== undefined) member.phone = req.body.phone;
+    if (req.body.gender !== undefined) member.gender = req.body.gender;
+    if (req.body.address !== undefined) member.address = req.body.address;
+    if (req.body.emergencyName !== undefined)
+      member.emergencyName = req.body.emergencyName;
+    if (req.body.emergencyPhone !== undefined)
+      member.emergencyPhone = req.body.emergencyPhone;
+    if (req.body.healthNotes !== undefined)
+      member.healthNotes = req.body.healthNotes;
+    if (req.body.profilePic !== undefined)
+      member.profilePic = req.body.profilePic;
+    if (req.body.paymentStatus !== undefined) {
+      member.paymentStatus = req.body.paymentStatus;
+    }
 
-    const paymentEntry = paymentChanged
-      ? {
+    if (fee !== member.fee) {
+      member.fee = fee;
+    }
+
+    let paymentHistoryEntry = null;
+    if (paymentDelta > 0) {
+      const applied = applyPaymentToCycles(
+        member,
+        paymentDelta,
+        actor,
+        req.body.paymentNote,
+        new Date(),
+        "payment"
+      );
+      if (applied.applied > 0) {
+        paymentHistoryEntry = {
           amount: paymentDelta,
-          fee,
-          paidAmount,
-          remainingAmount,
-          paymentStatus,
+          type: "payment",
+          fee: member.fee,
           by: actor,
           at: new Date(),
           note: req.body.paymentNote,
-        }
-      : null;
-
-    const update = {
-      $set: {
-        ...req.body,
-        fee,
-        paidAmount,
-        remainingAmount,
-        paymentStatus,
-        updatedBy: actor,
-      },
-    };
-
-    if (activityEntry || paymentEntry) {
-      update.$push = {};
-      if (activityEntry) update.$push.activityHistory = activityEntry;
-      if (paymentEntry) update.$push.paymentHistory = paymentEntry;
+          allocations: applied.allocations,
+        };
+      }
+    } else if (paymentDelta < 0) {
+      applyAdjustmentToCurrentCycle(
+        member,
+        paymentDelta,
+        actor,
+        req.body.paymentNote,
+        new Date()
+      );
+      paymentHistoryEntry = {
+        amount: paymentDelta,
+        type: "adjustment",
+        fee: member.fee,
+        by: actor,
+        at: new Date(),
+        note: req.body.paymentNote,
+        allocations: currentCycle
+          ? [
+              {
+                startDate: currentCycle.startDate,
+                endDate: currentCycle.endDate,
+                amount: paymentDelta,
+              },
+            ]
+          : [],
+      };
     }
 
-    const member = await Member.findByIdAndUpdate(req.params.id, update, {
-      new: true,
-    });
+    if (activityEntry) {
+      member.activityHistory.push(activityEntry);
+    }
+    member.updatedBy = actor;
+
+    syncMemberPaymentSummary(member);
+
+    if (paymentHistoryEntry) {
+      member.paymentHistory.push({
+        ...paymentHistoryEntry,
+        paidAmount: member.paidAmount,
+        remainingAmount: member.remainingAmount,
+        paymentStatus: member.paymentStatus,
+      });
+    }
+
+    await member.save();
     return res.status(200).json({
       success: true,
       message: "Member updated successfully",
@@ -400,6 +695,123 @@ const deleteMemberController = async (req, res) => {
   }
 };
 
+const adjustMemberPaymentHistoryController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+
+    const { historyIndex, newAmount, note } = req.body;
+    if (historyIndex === undefined || newAmount === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "historyIndex and newAmount are required",
+      });
+    }
+
+    ensurePaymentCycles(member);
+    const actor = await getActorFromRequest(req);
+
+    const result = adjustPaymentHistoryEntry(
+      member,
+      Number(historyIndex),
+      Number(newAmount),
+      actor,
+      note
+    );
+
+    syncMemberPaymentSummary(member);
+
+    member.paymentHistory.push({
+      amount: result.delta,
+      type: "adjustment",
+      fee: member.fee,
+      paidAmount: member.paidAmount,
+      remainingAmount: member.remainingAmount,
+      paymentStatus: member.paymentStatus,
+      by: actor,
+      at: new Date(),
+      note,
+      allocations: result.allocations,
+    });
+
+    await member.save();
+    return res.status(200).json({
+      success: true,
+      message: "Payment adjusted successfully",
+      member,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Error adjusting payment",
+    });
+  }
+};
+
+const addMemberPaymentController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+
+    const amount = Number(req.body.amount || 0);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0",
+      });
+    }
+
+    ensurePaymentCycles(member);
+    const actor = await getActorFromRequest(req);
+    const applied = applyPaymentToCycles(
+      member,
+      amount,
+      actor,
+      req.body.note,
+      new Date(),
+      "payment"
+    );
+
+    syncMemberPaymentSummary(member);
+
+    member.paymentHistory.push({
+      amount,
+      type: "payment",
+      fee: member.fee,
+      paidAmount: member.paidAmount,
+      remainingAmount: member.remainingAmount,
+      paymentStatus: member.paymentStatus,
+      by: actor,
+      at: new Date(),
+      note: req.body.note,
+      allocations: applied.allocations,
+    });
+
+    await member.save();
+    return res.status(200).json({
+      success: true,
+      message: "Payment added successfully",
+      member,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error adding payment",
+      error,
+    });
+  }
+};
+
 const getMemberDashboardController = async (req, res) => {
   try {
     const members = await Member.find({});
@@ -420,6 +832,11 @@ const getMemberDashboardController = async (req, res) => {
     };
 
     for (const m of members) {
+      ensurePaymentCycles(m);
+      syncMemberPaymentSummary(m);
+      if (m.isModified()) {
+        await m.save();
+      }
       const fee = Number(m.fee || 0);
       const paid = Number(m.paidAmount || 0);
       const remaining =
@@ -482,4 +899,6 @@ export {
   updateMemberController,
   deleteMemberController,
   getMemberDashboardController,
+  adjustMemberPaymentHistoryController,
+  addMemberPaymentController,
 };

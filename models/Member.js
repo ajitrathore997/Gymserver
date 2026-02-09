@@ -39,6 +39,11 @@ const paymentEntrySchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    type: {
+      type: String,
+      enum: ["payment", "adjustment"],
+      default: "payment",
+    },
     fee: {
       type: Number,
       default: 0,
@@ -63,6 +68,82 @@ const paymentEntrySchema = new mongoose.Schema(
     note: {
       type: String,
       trim: true,
+    },
+    allocations: {
+      type: [
+        new mongoose.Schema(
+          {
+            startDate: Date,
+            endDate: Date,
+            amount: Number,
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
+const cyclePaymentSchema = new mongoose.Schema(
+  {
+    amount: {
+      type: Number,
+      default: 0,
+    },
+    type: {
+      type: String,
+      enum: ["payment", "adjustment"],
+      default: "payment",
+    },
+    by: actorSchema,
+    at: {
+      type: Date,
+      default: Date.now,
+    },
+    note: {
+      type: String,
+      trim: true,
+    },
+  },
+  { _id: false }
+);
+
+const paymentCycleSchema = new mongoose.Schema(
+  {
+    startDate: {
+      type: Date,
+      required: true,
+    },
+    endDate: {
+      type: Date,
+      required: true,
+    },
+    cycleMonths: {
+      type: Number,
+      default: 1,
+    },
+    fee: {
+      type: Number,
+      default: 0,
+    },
+    paidAmount: {
+      type: Number,
+      default: 0,
+    },
+    remainingAmount: {
+      type: Number,
+      default: 0,
+    },
+    status: {
+      type: String,
+      enum: ["Paid", "Pending", "Free Trial"],
+      default: "Pending",
+    },
+    payments: {
+      type: [cyclePaymentSchema],
+      default: [],
     },
   },
   { _id: false }
@@ -159,6 +240,10 @@ const memberSchema = new mongoose.Schema(
     },
     paymentHistory: {
       type: [paymentEntrySchema],
+      default: [],
+    },
+    paymentCycles: {
+      type: [paymentCycleSchema],
       default: [],
     },
   },
