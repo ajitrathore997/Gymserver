@@ -29,7 +29,7 @@ contact:{
 
 role:{
     type:Number,
-    default:1
+    default:0
 }
 
 },{timestamps:true});
