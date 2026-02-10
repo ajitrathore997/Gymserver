@@ -1,5 +1,6 @@
 import Member from "../models/Member.js";
 import { User } from "../models/User.js";
+import Expense from "../models/Expense.js";
 
 const getDurationMonths = (duration) => {
   if (duration === undefined || duration === null) return 1;
@@ -695,6 +696,31 @@ const deleteMemberController = async (req, res) => {
   }
 };
 
+const uploadMemberProfileController = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded",
+      });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+    return res.status(200).json({
+      success: true,
+      url: fileUrl,
+      filename: req.file.filename,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error uploading file",
+      error,
+    });
+  }
+};
+
 const adjustMemberPaymentHistoryController = async (req, res) => {
   try {
     const member = await Member.findById(req.params.id);
@@ -773,12 +799,13 @@ const addMemberPaymentController = async (req, res) => {
 
     ensurePaymentCycles(member);
     const actor = await getActorFromRequest(req);
+    const paymentAt = req.body.date ? new Date(req.body.date) : new Date();
     const applied = applyPaymentToCycles(
       member,
       amount,
       actor,
       req.body.note,
-      new Date(),
+      paymentAt,
       "payment"
     );
 
@@ -792,7 +819,7 @@ const addMemberPaymentController = async (req, res) => {
       remainingAmount: member.remainingAmount,
       paymentStatus: member.paymentStatus,
       by: actor,
-      at: new Date(),
+      at: paymentAt,
       note: req.body.note,
       allocations: applied.allocations,
     });
@@ -814,7 +841,37 @@ const addMemberPaymentController = async (req, res) => {
 
 const getMemberDashboardController = async (req, res) => {
   try {
-    const members = await Member.find({});
+    const { startDate, endDate } = req.query;
+    const filter = {};
+    const range = {};
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) filter.createdAt.$gte = new Date(startDate);
+      if (endDate) filter.createdAt.$lte = new Date(endDate);
+      if (startDate) range.$gte = new Date(startDate);
+      if (endDate) range.$lte = new Date(endDate);
+    }
+
+    const members = await Member.find(filter);
+    let expensesInRange = 0;
+    let expensesCountInRange = 0;
+    const expenseBuckets = {};
+    if (range.$gte || range.$lte) {
+      const expenseQuery = {};
+      expenseQuery.date = {};
+      if (range.$gte) expenseQuery.date.$gte = range.$gte;
+      if (range.$lte) expenseQuery.date.$lte = range.$lte;
+      const expenses = await Expense.find(expenseQuery);
+      for (const e of expenses) {
+        expensesInRange += Number(e.amount || 0);
+        expensesCountInRange += 1;
+        const date = e.date ? new Date(e.date) : null;
+        if (date && !Number.isNaN(date.getTime())) {
+          const key = date.toISOString().slice(0, 10);
+          expenseBuckets[key] = (expenseBuckets[key] || 0) + Number(e.amount || 0);
+        }
+      }
+    }
     const now = new Date();
     const nextWeek = new Date();
     nextWeek.setDate(now.getDate() + 7);
@@ -829,8 +886,17 @@ const getMemberDashboardController = async (req, res) => {
       paymentStatusCounts: { Paid: 0, Pending: 0, "Free Trial": 0 },
       membershipTypeCounts: {},
       dueNextWeekMembers: [],
+      paidInRange: 0,
+      paymentsCountInRange: 0,
+      membersJoinedInRange: members.length,
+      paymentSeries: [],
+      expensesInRange,
+      expensesCountInRange,
+      netInRange: 0,
+      expenseSeries: [],
     };
 
+    const paymentBuckets = {};
     for (const m of members) {
       ensurePaymentCycles(m);
       syncMemberPaymentSummary(m);
@@ -875,7 +941,64 @@ const getMemberDashboardController = async (req, res) => {
           });
         }
       }
+
+      if (range.$gte || range.$lte) {
+        const history = Array.isArray(m.paymentHistory) ? m.paymentHistory : [];
+        for (const p of history) {
+          if (p.type !== "payment") continue;
+          const at = p.at ? new Date(p.at) : null;
+          if (!at || Number.isNaN(at.getTime())) continue;
+          if (range.$gte && at < range.$gte) continue;
+          if (range.$lte && at > range.$lte) continue;
+          stats.paidInRange += Number(p.amount || 0);
+          stats.paymentsCountInRange += 1;
+          const key = at.toISOString().slice(0, 10);
+          paymentBuckets[key] = (paymentBuckets[key] || 0) + Number(p.amount || 0);
+        }
+      }
     }
+
+    if (range.$gte || range.$lte) {
+      const start = range.$gte ? new Date(range.$gte) : null;
+      const end = range.$lte ? new Date(range.$lte) : null;
+      const series = [];
+      if (start && end) {
+        const cursor = new Date(start);
+        while (cursor <= end) {
+          const key = cursor.toISOString().slice(0, 10);
+          series.push({ date: key, total: paymentBuckets[key] || 0 });
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      } else {
+        for (const [date, total] of Object.entries(paymentBuckets)) {
+          series.push({ date, total });
+        }
+        series.sort((a, b) => new Date(a.date) - new Date(b.date));
+      }
+      stats.paymentSeries = series;
+    }
+
+    if (range.$gte || range.$lte) {
+      const start = range.$gte ? new Date(range.$gte) : null;
+      const end = range.$lte ? new Date(range.$lte) : null;
+      const series = [];
+      if (start && end) {
+        const cursor = new Date(start);
+        while (cursor <= end) {
+          const key = cursor.toISOString().slice(0, 10);
+          series.push({ date: key, total: expenseBuckets[key] || 0 });
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      } else {
+        for (const [date, total] of Object.entries(expenseBuckets)) {
+          series.push({ date, total });
+        }
+        series.sort((a, b) => new Date(a.date) - new Date(b.date));
+      }
+      stats.expenseSeries = series;
+    }
+
+    stats.netInRange = Number(stats.paidInRange || 0) - Number(stats.expensesInRange || 0);
 
     stats.dueNextWeekMembers.sort(
       (a, b) => new Date(a.endDate) - new Date(b.endDate)
@@ -901,4 +1024,5 @@ export {
   getMemberDashboardController,
   adjustMemberPaymentHistoryController,
   addMemberPaymentController,
+  uploadMemberProfileController,
 };

@@ -3,6 +3,7 @@ import express from "express";
 import bodyParser from "body-parser";
 import cors from "cors";
 import * as dotenv from "dotenv";
+import path from "path";
 
 const app = express();
 
@@ -10,6 +11,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(bodyParser.urlencoded({extended:true}));
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 dotenv.config();
 
@@ -23,6 +25,8 @@ import subscriptionRoute from "./routes/subscriptionRoute.js";
 import ContactRoute from "./routes/contactRoute.js";
 import feedBackRoute from "./routes/feedBackRoute.js";
 import memberRoute from "./routes/memberRoute.js";
+import expenseRoute from "./routes/expenseRoute.js";
+import inquiryRoute from "./routes/inquiryRoute.js";
 
 app.get("/", (req, res) =>{
 res.send("server is running successfully");
@@ -34,6 +38,8 @@ app.use("/api/v1/subscription", subscriptionRoute);
 app.use("/api/v1/contact", ContactRoute);
 app.use("/api/v1/feedback", feedBackRoute);
 app.use("/api/v1/members", memberRoute);
+app.use("/api/v1/expenses", expenseRoute);
+app.use("/api/v1/inquiries", inquiryRoute);
 
 
 const startServer = async () => {

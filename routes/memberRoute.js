@@ -8,10 +8,48 @@ import {
   getMemberDashboardController,
   adjustMemberPaymentHistoryController,
   addMemberPaymentController,
+  uploadMemberProfileController,
 } from "../controlllers/memberController.js";
 import { requireSignIn, isAdmin } from "../Middlewares/authMiddleware.js";
+import multer from "multer";
+import fs from "fs";
+import path from "path";
 
 const router = express.Router();
+
+const uploadDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const name = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, name);
+  },
+});
+
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) {
+      return cb(new Error("Only image files are allowed"));
+    }
+    cb(null, true);
+  },
+});
+
+router.post(
+  "/upload",
+  requireSignIn,
+  isAdmin,
+  upload.single("profilePic"),
+  uploadMemberProfileController
+);
 
 router.post("/", requireSignIn, isAdmin, createMemberController);
 router.get("/", requireSignIn, isAdmin, getMembersController);
