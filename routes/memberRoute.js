@@ -9,6 +9,8 @@ import {
   adjustMemberPaymentHistoryController,
   addMemberPaymentController,
   uploadMemberProfileController,
+  updateMemberPaymentStatusController,
+  deleteMemberPaymentHistoryController,
 } from "../controlllers/memberController.js";
 import { requireSignIn, isAdmin } from "../Middlewares/authMiddleware.js";
 import multer from "multer";
@@ -61,6 +63,18 @@ router.put(
   requireSignIn,
   isAdmin,
   adjustMemberPaymentHistoryController
+);
+router.put(
+  "/:id/payment-history/:index/status",
+  requireSignIn,
+  isAdmin,
+  updateMemberPaymentStatusController
+);
+router.delete(
+  "/:id/payment-history/:index",
+  requireSignIn,
+  isAdmin,
+  deleteMemberPaymentHistoryController
 );
 router.post(
   "/:id/pay",

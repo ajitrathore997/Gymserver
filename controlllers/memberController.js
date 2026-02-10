@@ -779,6 +779,106 @@ const adjustMemberPaymentHistoryController = async (req, res) => {
   }
 };
 
+const updateMemberPaymentStatusController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+    const index = Number(req.params.index);
+    const { paymentStatus } = req.body;
+    if (!paymentStatus) {
+      return res.status(400).json({
+        success: false,
+        message: "paymentStatus is required",
+      });
+    }
+    if (!Array.isArray(member.paymentHistory) || !member.paymentHistory[index]) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment history entry not found",
+      });
+    }
+
+    member.paymentHistory[index].paymentStatus = paymentStatus;
+    await member.save();
+    return res.status(200).json({
+      success: true,
+      message: "Payment status updated",
+      member,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error updating payment status",
+      error,
+    });
+  }
+};
+
+const deleteMemberPaymentHistoryController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+    const index = Number(req.params.index);
+    if (!Array.isArray(member.paymentHistory) || !member.paymentHistory[index]) {
+      return res.status(404).json({
+        success: false,
+        message: "Payment history entry not found",
+      });
+    }
+
+    ensurePaymentCycles(member);
+    const actor = await getActorFromRequest(req);
+    const entry = member.paymentHistory[index];
+    if (entry.type !== "payment") {
+      return res.status(400).json({
+        success: false,
+        message: "Only payment entries can be deleted",
+      });
+    }
+    adjustPaymentHistoryEntry(member, index, 0, actor, req.body?.note);
+
+    member.paymentHistory.splice(index, 1);
+
+    syncMemberPaymentSummary(member);
+
+    member.paymentHistory.push({
+      amount: -Number(entry.amount || 0),
+      type: "adjustment",
+      fee: member.fee,
+      paidAmount: member.paidAmount,
+      remainingAmount: member.remainingAmount,
+      paymentStatus: member.paymentStatus,
+      by: actor,
+      at: new Date(),
+      note: req.body?.note || "Deleted payment entry",
+      allocations: entry.allocations || [],
+    });
+
+    await member.save();
+    return res.status(200).json({
+      success: true,
+      message: "Payment deleted",
+      member,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error deleting payment",
+      error,
+    });
+  }
+};
+
 const addMemberPaymentController = async (req, res) => {
   try {
     const member = await Member.findById(req.params.id);
@@ -1025,4 +1125,6 @@ export {
   adjustMemberPaymentHistoryController,
   addMemberPaymentController,
   uploadMemberProfileController,
+  updateMemberPaymentStatusController,
+  deleteMemberPaymentHistoryController,
 };
