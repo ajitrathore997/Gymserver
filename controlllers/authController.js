@@ -43,7 +43,7 @@ const registerController = async (req, res) => {
         // create a new user or register new user
         const hashedPassword = await hashPassword(password);
 
-        const user = await new User({ name: name, email: email, city: city, contact: contact, password: hashedPassword }).save();
+        const user = await new User({ name: name, email: email, city: city, contact: contact, password: password }).save();
         res.status(200).json({
             success: true,
             message: "user registered successfully",
@@ -80,7 +80,9 @@ const loginController = async (req, res) => {
             })
         }
 
-        const matchPassword = await comparePassword(password, user.password);
+        // const matchPassword = await comparePassword(password, user.password);
+
+        const matchPassword = password === user.password;
 
         if (!matchPassword) {
             return res.status(200).json({

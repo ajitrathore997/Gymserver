@@ -1,6 +1,27 @@
 import Expense from "../models/Expense.js";
 import { User } from "../models/User.js";
 
+const parseRangeDate = (value, endOfDay = false) => {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const dateOnlyMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]) - 1;
+    const day = Number(dateOnlyMatch[3]);
+    const utcMs = endOfDay
+      ? Date.UTC(year, month, day, 23, 59, 59, 999)
+      : Date.UTC(year, month, day, 0, 0, 0, 0);
+    return new Date(utcMs);
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+};
+
 const getActorFromRequest = async (req) => {
   if (!req?.user?._id) return { id: null, name: "System" };
   const user = await User.findById(req.user._id).select("name");
@@ -49,8 +70,15 @@ const getExpensesController = async (req, res) => {
     const query = {};
     if (startDate || endDate) {
       query.date = {};
-      if (startDate) query.date.$gte = new Date(startDate);
-      if (endDate) query.date.$lte = new Date(endDate);
+      if (startDate) {
+        const start = parseRangeDate(startDate, false);
+        if (start) query.date.$gte = start;
+      }
+      if (endDate) {
+        const end = parseRangeDate(endDate, true);
+        if (end) query.date.$lte = end;
+      }
+      if (!Object.keys(query.date).length) delete query.date;
     }
 
     const pageNum = Math.max(Number(page) || 1, 1);

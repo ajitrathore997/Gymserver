@@ -28,6 +28,27 @@ const addMonths = (date, months) => {
   return next;
 };
 
+const parseRangeDate = (value, endOfDay = false) => {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const dateOnlyMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]) - 1;
+    const day = Number(dateOnlyMatch[3]);
+    const utcMs = endOfDay
+      ? Date.UTC(year, month, day, 23, 59, 59, 999)
+      : Date.UTC(year, month, day, 0, 0, 0, 0);
+    return new Date(utcMs);
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+};
+
 const getActorFromRequest = async (req) => {
   if (!req?.user?._id) return { id: null, name: "System" };
   const user = await User.findById(req.user._id).select("name");
@@ -404,8 +425,15 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
 
     if (startFrom || startTo) {
       query.startDate = {};
-      if (startFrom) query.startDate.$gte = new Date(startFrom);
-      if (startTo) query.startDate.$lte = new Date(startTo);
+      if (startFrom) {
+        const start = parseRangeDate(startFrom, false);
+        if (start) query.startDate.$gte = start;
+      }
+      if (startTo) {
+        const end = parseRangeDate(startTo, true);
+        if (end) query.startDate.$lte = end;
+      }
+      if (!Object.keys(query.startDate).length) delete query.startDate;
     }
 
     const safeSortFields = new Set([
@@ -946,10 +974,21 @@ const getMemberDashboardController = async (req, res) => {
     const range = {};
     if (startDate || endDate) {
       filter.createdAt = {};
-      if (startDate) filter.createdAt.$gte = new Date(startDate);
-      if (endDate) filter.createdAt.$lte = new Date(endDate);
-      if (startDate) range.$gte = new Date(startDate);
-      if (endDate) range.$lte = new Date(endDate);
+      if (startDate) {
+        const start = parseRangeDate(startDate, false);
+        if (start) {
+          filter.createdAt.$gte = start;
+          range.$gte = start;
+        }
+      }
+      if (endDate) {
+        const end = parseRangeDate(endDate, true);
+        if (end) {
+          filter.createdAt.$lte = end;
+          range.$lte = end;
+        }
+      }
+      if (!Object.keys(filter.createdAt).length) delete filter.createdAt;
     }
 
     const members = await Member.find(filter);
@@ -990,6 +1029,7 @@ const getMemberDashboardController = async (req, res) => {
       paymentsCountInRange: 0,
       membersJoinedInRange: members.length,
       paymentSeries: [],
+      membersJoinedSeries: [],
       expensesInRange,
       expensesCountInRange,
       netInRange: 0,
@@ -997,6 +1037,7 @@ const getMemberDashboardController = async (req, res) => {
     };
 
     const paymentBuckets = {};
+    const joinedBuckets = {};
     for (const m of members) {
       ensurePaymentCycles(m);
       syncMemberPaymentSummary(m);
@@ -1026,6 +1067,11 @@ const getMemberDashboardController = async (req, res) => {
       const type = m.membershipType || "Other";
       stats.membershipTypeCounts[type] =
         (stats.membershipTypeCounts[type] || 0) + 1;
+      const joinedAt = m.createdAt ? new Date(m.createdAt) : null;
+      if (joinedAt && !Number.isNaN(joinedAt.getTime())) {
+        const key = joinedAt.toISOString().slice(0, 10);
+        joinedBuckets[key] = (joinedBuckets[key] || 0) + 1;
+      }
 
       const effectiveStartDate = m.startDate || m.createdAt;
       const endDate = getEndDate(effectiveStartDate, m.duration);
@@ -1096,6 +1142,26 @@ const getMemberDashboardController = async (req, res) => {
         series.sort((a, b) => new Date(a.date) - new Date(b.date));
       }
       stats.expenseSeries = series;
+    }
+
+    if (range.$gte || range.$lte) {
+      const start = range.$gte ? new Date(range.$gte) : null;
+      const end = range.$lte ? new Date(range.$lte) : null;
+      const series = [];
+      if (start && end) {
+        const cursor = new Date(start);
+        while (cursor <= end) {
+          const key = cursor.toISOString().slice(0, 10);
+          series.push({ date: key, total: joinedBuckets[key] || 0 });
+          cursor.setDate(cursor.getDate() + 1);
+        }
+      } else {
+        for (const [date, total] of Object.entries(joinedBuckets)) {
+          series.push({ date, total });
+        }
+        series.sort((a, b) => new Date(a.date) - new Date(b.date));
+      }
+      stats.membersJoinedSeries = series;
     }
 
     stats.netInRange = Number(stats.paidInRange || 0) - Number(stats.expensesInRange || 0);
