@@ -39,6 +39,10 @@ const paymentEntrySchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    unappliedAmount: {
+      type: Number,
+      default: 0,
+    },
     type: {
       type: String,
       enum: ["payment", "adjustment"],
@@ -68,6 +72,18 @@ const paymentEntrySchema = new mongoose.Schema(
     note: {
       type: String,
       trim: true,
+    },
+    paymentMonth: {
+      type: String,
+      trim: true,
+    },
+    paymentMode: {
+      type: String,
+      enum: ["Cash", "UPI", "Card", "Bank Transfer", "Other"],
+      default: "Cash",
+    },
+    promiseDate: {
+      type: Date,
     },
     allocations: {
       type: [
@@ -218,6 +234,19 @@ const memberSchema = new mongoose.Schema(
       type: String,
       enum: ["Paid", "Pending", "Free Trial"],
       default: "Paid",
+    },
+    memberStatus: {
+      type: String,
+      enum: ["Active", "Inactive"],
+      default: "Active",
+    },
+    reminderStatus: {
+      type: String,
+      enum: ["None", "Promised"],
+      default: "None",
+    },
+    promisedPaymentDate: {
+      type: Date,
     },
     personalTrainer: {
       type: String,

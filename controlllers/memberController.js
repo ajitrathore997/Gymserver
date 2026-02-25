@@ -12,15 +12,6 @@ const getDurationMonths = (duration) => {
   return 1;
 };
 
-const getEndDate = (startDate, duration) => {
-  if (!startDate) return null;
-  const months = getDurationMonths(duration);
-  const endDate = new Date(startDate);
-  if (Number.isNaN(endDate.getTime())) return null;
-  endDate.setMonth(endDate.getMonth() + months);
-  return endDate;
-};
-
 const addMonths = (date, months) => {
   const next = new Date(date);
   if (Number.isNaN(next.getTime())) return null;
@@ -58,6 +49,36 @@ const getActorFromRequest = async (req) => {
   };
 };
 
+const parsePaymentMonth = (value) => {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const parsed = new Date(`01 ${raw}`);
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+
+  const monthMap = {
+    january: 0,
+    february: 1,
+    march: 2,
+    april: 3,
+    may: 4,
+    june: 5,
+    july: 6,
+    august: 7,
+    september: 8,
+    october: 9,
+    november: 10,
+    december: 11,
+  };
+  const match = raw.toLowerCase().match(/^([a-z]+)\s+(\d{4})$/);
+  if (!match) return null;
+  const month = monthMap[match[1]];
+  const year = Number(match[2]);
+  if (month === undefined || Number.isNaN(year)) return null;
+  return new Date(year, month, 1);
+};
+
 const buildCycle = (startDate, cycleMonths, fee) => {
   const endDate = addMonths(startDate, cycleMonths);
   return {
@@ -78,10 +99,9 @@ const ensurePaymentCycles = (member) => {
     : [];
   const cycleMonths = getDurationMonths(member.duration);
   const fee = Number(member.fee || 0);
-  const now = new Date();
 
   if (cycles.length === 0) {
-    const start = member.startDate ? new Date(member.startDate) : now;
+    const start = member.startDate ? new Date(member.startDate) : new Date();
     cycles.push(buildCycle(start, cycleMonths, fee));
   }
 
@@ -90,14 +110,81 @@ const ensurePaymentCycles = (member) => {
     last.endDate = addMonths(last.startDate, last.cycleMonths || cycleMonths);
   }
 
-  while (last.endDate && last.endDate < now) {
-    const nextStart = new Date(last.endDate);
-    const next = buildCycle(nextStart, cycleMonths, fee);
-    cycles.push(next);
-    last = next;
-  }
-
   member.paymentCycles = cycles;
+};
+
+const ensureCycleForPaymentMonth = (member, paymentMonthLabel) => {
+  const targetMonth = parsePaymentMonth(paymentMonthLabel);
+  if (!targetMonth) return null;
+
+  ensurePaymentCycles(member);
+  const cycles = member.paymentCycles || [];
+  const cycleMonths = getDurationMonths(member.duration);
+  const fee = Number(member.fee || 0);
+
+  while (true) {
+    const matchIndex = cycles.findIndex((cycle) => {
+      const start = cycle?.startDate ? new Date(cycle.startDate) : null;
+      if (!start || Number.isNaN(start.getTime())) return false;
+      return (
+        start.getFullYear() === targetMonth.getFullYear() &&
+        start.getMonth() === targetMonth.getMonth()
+      );
+    });
+
+    if (matchIndex >= 0) return matchIndex;
+
+    const last = cycles[cycles.length - 1];
+    if (!last?.endDate) return null;
+    const lastStart = last.startDate ? new Date(last.startDate) : null;
+    if (!lastStart || Number.isNaN(lastStart.getTime())) return null;
+
+    const lastMonthKey = lastStart.getFullYear() * 12 + lastStart.getMonth();
+    const targetMonthKey = targetMonth.getFullYear() * 12 + targetMonth.getMonth();
+    if (lastMonthKey >= targetMonthKey) return null;
+
+    const nextStart = new Date(last.endDate);
+    cycles.push(buildCycle(nextStart, cycleMonths, fee));
+  }
+};
+
+const applyPaymentToSingleCycle = (
+  member,
+  cycleIndex,
+  amount,
+  actor,
+  note,
+  at,
+  type = "payment"
+) => {
+  const cycles = member.paymentCycles || [];
+  const cycle = cycles[cycleIndex];
+  if (!cycle || amount <= 0) return { applied: 0, allocations: [] };
+
+  const applied = Math.min(Number(cycle.remainingAmount || 0), Number(amount || 0));
+  if (applied <= 0) return { applied: 0, allocations: [] };
+
+  cycle.paidAmount += applied;
+  cycle.remainingAmount -= applied;
+  cycle.status = cycle.remainingAmount === 0 ? "Paid" : "Pending";
+  cycle.payments.push({
+    amount: applied,
+    type,
+    by: actor,
+    at,
+    note,
+  });
+
+  return {
+    applied,
+    allocations: [
+      {
+        startDate: cycle.startDate,
+        endDate: cycle.endDate,
+        amount: applied,
+      },
+    ],
+  };
 };
 
 const applyPaymentToCycles = (member, amount, actor, note, at, type = "payment") => {
@@ -105,18 +192,11 @@ const applyPaymentToCycles = (member, amount, actor, note, at, type = "payment")
   if (remaining === 0) return { applied: 0, allocations: [] };
   const allocations = [];
   const cycles = member.paymentCycles || [];
-  const cycleMonths = getDurationMonths(member.duration);
-  const fee = Number(member.fee || 0);
 
   let index = 0;
   while (remaining > 0) {
     const cycle = cycles[index];
-    if (!cycle) {
-      const last = cycles[cycles.length - 1];
-      const nextStart = last?.endDate ? new Date(last.endDate) : new Date();
-      cycles.push(buildCycle(nextStart, cycleMonths, fee));
-      continue;
-    }
+    if (!cycle) break;
 
     if (cycle.remainingAmount <= 0) {
       index += 1;
@@ -272,6 +352,11 @@ const syncMemberPaymentSummary = (member) => {
       : "Pending";
 };
 
+const getCurrentCycle = (member) => {
+  const cycles = Array.isArray(member?.paymentCycles) ? member.paymentCycles : [];
+  return cycles.length ? cycles[cycles.length - 1] : null;
+};
+
 const createMemberController = async (req, res) => {
   try {
     const fee = Number(req.body.fee || 0);
@@ -297,6 +382,8 @@ const createMemberController = async (req, res) => {
       ...req.body,
       fee,
       paymentStatus,
+      memberStatus: req.body.memberStatus || "Active",
+      reminderStatus: req.body.reminderStatus || "None",
       createdBy: actor,
       updatedBy: actor,
       activityHistory: [activityEntry],
@@ -322,6 +409,7 @@ const createMemberController = async (req, res) => {
     if (appliedOnCreate?.applied > 0) {
       member.paymentHistory.push({
         amount: paidAmount,
+        unappliedAmount: Math.max(paidAmount - Number(appliedOnCreate.applied || 0), 0),
         type: "payment",
         fee,
         paidAmount: member.paidAmount,
@@ -330,6 +418,8 @@ const createMemberController = async (req, res) => {
         by: actor,
         at: new Date(),
         note: req.body.paymentNote,
+        paymentMonth: req.body.paymentMonth,
+        paymentMode: req.body.paymentMode || "Cash",
         allocations: appliedOnCreate.allocations,
       });
     }
@@ -355,6 +445,9 @@ const getMembersController = async (req, res) => {
     const {
       search,
       paymentStatus,
+      memberStatus,
+      reminderStatus,
+      listType,
       membershipType,
       personalTrainer,
       minRemaining,
@@ -384,6 +477,8 @@ const getMembersController = async (req, res) => {
     }
 
     if (paymentStatus) query.paymentStatus = paymentStatus;
+    if (memberStatus) query.memberStatus = memberStatus;
+    if (reminderStatus) query.reminderStatus = reminderStatus;
     if (membershipType) query.membershipType = membershipType;
     if (personalTrainer) query.personalTrainer = personalTrainer;
 
@@ -453,28 +548,78 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
     const skip = (pageNum - 1) * limitNum;
 
     // console.log("Query:", query);
-    const [members, total] = await Promise.all([
-      Member.find(query).sort(sort).skip(skip).limit(limitNum),
-      Member.countDocuments(query),
+    const needsDerivedListFilter = listType === "active" || listType === "reminder";
+
+    const [members, totalRaw] = await Promise.all([
+      needsDerivedListFilter
+        ? Member.find(query).sort(sort)
+        : Member.find(query).sort(sort).skip(skip).limit(limitNum),
+      needsDerivedListFilter ? Promise.resolve(0) : Member.countDocuments(query),
     ]);
 
-    const membersWithPayments = await Promise.all(members.map(async (m) => {
-      ensurePaymentCycles(m);
-      syncMemberPaymentSummary(m);
-      if (m.isModified()) {
-        await m.save();
+    const now = new Date();
+    const hydratedMembers = await Promise.all(
+      members.map(async (m) => {
+        ensurePaymentCycles(m);
+        syncMemberPaymentSummary(m);
+        if (m.isModified()) {
+          await m.save();
+        }
+        const obj = m.toObject();
+        const history = Array.isArray(obj.paymentHistory) ? obj.paymentHistory : [];
+        const lastPayment = history.length ? history[history.length - 1] : null;
+        const currentCycle = getCurrentCycle(obj);
+        const expiryDate = currentCycle?.endDate || null;
+        const expiry = expiryDate ? new Date(expiryDate) : null;
+        const isExpired = expiry ? expiry < now : false;
+        const storedRemaining = Number(obj.remainingAmount || 0);
+        const dueForExpiredPaidCycle =
+          obj.memberStatus === "Active" && isExpired
+            ? Number(obj.fee || 0)
+            : 0;
+        const dueNowAmount = storedRemaining + dueForExpiredPaidCycle;
+        const displayPaymentStatus =
+          dueNowAmount > 0
+            ? "Pending"
+            : obj.paymentStatus === "Free Trial" && Number(obj.fee || 0) === 0
+            ? "Free Trial"
+            : "Paid";
+        return {
+          ...obj,
+          lastPayment,
+          expiryDate,
+          isExpired,
+          dueNowAmount,
+          displayPaymentStatus,
+          lastPaymentMonth: lastPayment?.paymentMonth || null,
+        };
+      })
+    );
+
+    const membersWithPayments = hydratedMembers.filter((m) => {
+      if (listType === "active") {
+        return (
+          m.memberStatus === "Active" &&
+          m.expiryDate &&
+          new Date(m.expiryDate) >= now
+        );
       }
-      const obj = m.toObject();
-      const history = Array.isArray(obj.paymentHistory)
-        ? obj.paymentHistory
-        : [];
-      const lastPayment = history.length ? history[history.length - 1] : null;
-      return { ...obj, lastPayment };
-    }));
+      if (listType === "reminder") {
+        const promised = m.reminderStatus === "Promised";
+        const pending = Number(m.dueNowAmount || 0) > 0;
+        return m.memberStatus === "Active" && (m.isExpired || pending || promised);
+      }
+      return true;
+    });
+
+    const total = needsDerivedListFilter ? membersWithPayments.length : totalRaw;
+    const pagedMembers = needsDerivedListFilter
+      ? membersWithPayments.slice(skip, skip + limitNum)
+      : membersWithPayments;
 
     return res.status(200).json({
       success: true,
-      members: membersWithPayments,
+      members: pagedMembers,
       page: pageNum,
       limit: limitNum,
       total,
@@ -508,11 +653,22 @@ const getMemberByIdController = async (req, res) => {
       (sum, c) => sum + Number(c.remainingAmount || 0),
       0
     );
+    const expiryDate = currentCycle?.endDate || null;
+    const isExpired = expiryDate ? new Date(expiryDate) < new Date() : false;
+    const storedRemaining = Number(member.remainingAmount || 0);
+    const dueForExpiredPaidCycle =
+      member.memberStatus === "Active" && isExpired
+        ? Number(member.fee || 0)
+        : 0;
+    const dueNowAmount = storedRemaining + dueForExpiredPaidCycle;
     return res.status(200).json({
       success: true,
       member,
       currentCycle,
       totalOutstanding,
+      expiryDate,
+      isExpired,
+      dueNowAmount,
     });
   } catch (error) {
     console.error("Error getting member:", error);
@@ -580,6 +736,8 @@ const updateMemberController = async (req, res) => {
       member.assignedTrainer,
       req.body.assignedTrainer
     );
+    addIfChanged("memberStatus", member.memberStatus, req.body.memberStatus);
+    addIfChanged("reminderStatus", member.reminderStatus, req.body.reminderStatus);
     addIfChanged("fee", member.fee, fee, false);
     addIfChanged("paidAmount", existingPaid, desiredPaid, false);
 
@@ -613,6 +771,10 @@ const updateMemberController = async (req, res) => {
       member.healthNotes = req.body.healthNotes;
     if (req.body.profilePic !== undefined)
       member.profilePic = req.body.profilePic;
+    if (req.body.memberStatus !== undefined)
+      member.memberStatus = req.body.memberStatus;
+    if (req.body.reminderStatus !== undefined)
+      member.reminderStatus = req.body.reminderStatus;
     if (req.body.paymentStatus !== undefined) {
       member.paymentStatus = req.body.paymentStatus;
     }
@@ -634,11 +796,14 @@ const updateMemberController = async (req, res) => {
       if (applied.applied > 0) {
         paymentHistoryEntry = {
           amount: paymentDelta,
+          unappliedAmount: Math.max(paymentDelta - Number(applied.applied || 0), 0),
           type: "payment",
           fee: member.fee,
           by: actor,
           at: new Date(),
           note: req.body.paymentNote,
+          paymentMonth: req.body.paymentMonth,
+          paymentMode: req.body.paymentMode || "Cash",
           allocations: applied.allocations,
         };
       }
@@ -657,6 +822,8 @@ const updateMemberController = async (req, res) => {
         by: actor,
         at: new Date(),
         note: req.body.paymentNote,
+        paymentMonth: req.body.paymentMonth,
+        paymentMode: req.body.paymentMode || "Cash",
         allocations: currentCycle
           ? [
               {
@@ -790,6 +957,8 @@ const adjustMemberPaymentHistoryController = async (req, res) => {
       by: actor,
       at: new Date(),
       note,
+      paymentMonth: req.body?.paymentMonth,
+      paymentMode: req.body?.paymentMode || "Cash",
       allocations: result.allocations,
     });
 
@@ -924,23 +1093,102 @@ const addMemberPaymentController = async (req, res) => {
         message: "Amount must be greater than 0",
       });
     }
+    if (!req.body.paymentMonth) {
+      return res.status(400).json({
+        success: false,
+        message: "paymentMonth is required",
+      });
+    }
+    if (!req.body.paymentMode) {
+      return res.status(400).json({
+        success: false,
+        message: "paymentMode is required",
+      });
+    }
 
     ensurePaymentCycles(member);
     const actor = await getActorFromRequest(req);
     const paymentAt = req.body.date ? new Date(req.body.date) : new Date();
-    const applied = applyPaymentToCycles(
+    if (Number.isNaN(paymentAt.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment date",
+      });
+    }
+    const taggedCycleIndex = ensureCycleForPaymentMonth(
       member,
-      amount,
-      actor,
-      req.body.note,
-      paymentAt,
-      "payment"
+      req.body.paymentMonth
     );
+    if (req.body.paymentMonth && taggedCycleIndex === null) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Selected payment month is outside this member timeline. Use a valid month or set membership start/restart for historical entry.",
+      });
+    }
+    const previousRemaining = Number(
+      taggedCycleIndex !== null
+        ? member.paymentCycles?.[taggedCycleIndex]?.remainingAmount || 0
+        : member.remainingAmount || 0
+    );
+    const applied =
+      taggedCycleIndex !== null
+        ? applyPaymentToSingleCycle(
+            member,
+            taggedCycleIndex,
+            amount,
+            actor,
+            req.body.note,
+            paymentAt,
+            "payment"
+          )
+        : applyPaymentToCycles(
+            member,
+            amount,
+            actor,
+            req.body.note,
+            paymentAt,
+            "payment"
+          );
 
     syncMemberPaymentSummary(member);
 
+    const relevantRemaining =
+      taggedCycleIndex !== null
+        ? Number(member.paymentCycles?.[taggedCycleIndex]?.remainingAmount || 0)
+        : Number(member.remainingAmount || 0);
+    const isPartialPayment = relevantRemaining > 0 && amount < previousRemaining;
+    let promisedDate = null;
+    if (isPartialPayment) {
+      if (!req.body.promiseDate) {
+        return res.status(400).json({
+          success: false,
+          message: "promiseDate is required for partial payment",
+        });
+      }
+      promisedDate = new Date(req.body.promiseDate);
+      if (Number.isNaN(promisedDate.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid promiseDate",
+        });
+      }
+      if (promisedDate < paymentAt) {
+        return res.status(400).json({
+          success: false,
+          message: "promiseDate cannot be earlier than payment date",
+        });
+      }
+      member.reminderStatus = "Promised";
+      member.promisedPaymentDate = promisedDate;
+    } else if (Number(member.remainingAmount || 0) <= 0) {
+      member.reminderStatus = "None";
+      member.promisedPaymentDate = null;
+    }
+
     member.paymentHistory.push({
       amount,
+      unappliedAmount: Math.max(amount - Number(applied.applied || 0), 0),
       type: "payment",
       fee: member.fee,
       paidAmount: member.paidAmount,
@@ -949,6 +1197,9 @@ const addMemberPaymentController = async (req, res) => {
       by: actor,
       at: paymentAt,
       note: req.body.note,
+      paymentMonth: req.body.paymentMonth,
+      paymentMode: req.body.paymentMode,
+      promiseDate: promisedDate,
       allocations: applied.allocations,
     });
 
@@ -962,6 +1213,200 @@ const addMemberPaymentController = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Error adding payment",
+      error,
+    });
+  }
+};
+
+const startFreshMemberCycle = (member, options = {}) => {
+  const startDate = options.startDate ? new Date(options.startDate) : new Date();
+  if (Number.isNaN(startDate.getTime())) {
+    throw new Error("Invalid startDate");
+  }
+
+  const nextDuration = options.duration || member.duration;
+  const nextFee =
+    options.fee !== undefined ? Number(options.fee) : Number(member.fee || 0);
+  const cycleMonths = getDurationMonths(nextDuration);
+
+  ensurePaymentCycles(member);
+  const current = getCurrentCycle(member);
+  if (current && Number(current.remainingAmount || 0) > 0) {
+    current.remainingAmount = 0;
+    current.status = "Paid";
+  }
+
+  member.duration = nextDuration;
+  member.fee = nextFee;
+  member.startDate = startDate;
+  member.memberStatus = "Active";
+  member.reminderStatus = "None";
+
+  member.paymentCycles.push(buildCycle(startDate, cycleMonths, nextFee));
+  syncMemberPaymentSummary(member);
+};
+
+const restartMemberCycleController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+
+    const actor = await getActorFromRequest(req);
+    startFreshMemberCycle(member, {
+      startDate: req.body.startDate,
+      duration: req.body.duration,
+      fee: req.body.fee,
+    });
+
+    member.updatedBy = actor;
+    member.activityHistory.push({
+      action: "restart_cycle",
+      by: actor,
+      at: new Date(),
+      changes: {
+        startDate: member.startDate,
+        duration: member.duration,
+        fee: member.fee,
+      },
+    });
+
+    await member.save();
+    return res.status(200).json({
+      success: true,
+      message: "New cycle started",
+      member,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Error restarting cycle",
+    });
+  }
+};
+
+const updateMemberStatusController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+
+    const { memberStatus } = req.body;
+    if (!["Active", "Inactive"].includes(memberStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: "memberStatus must be Active or Inactive",
+      });
+    }
+
+    const actor = await getActorFromRequest(req);
+    const oldStatus = member.memberStatus || "Active";
+
+    if (oldStatus === "Inactive" && memberStatus === "Active") {
+      startFreshMemberCycle(member, {
+        startDate: req.body.startDate,
+        duration: req.body.duration,
+        fee: req.body.fee,
+      });
+    } else {
+      member.memberStatus = memberStatus;
+      syncMemberPaymentSummary(member);
+    }
+
+    member.updatedBy = actor;
+    member.activityHistory.push({
+      action: "member_status",
+      by: actor,
+      at: new Date(),
+      changes: {
+        from: oldStatus,
+        to: memberStatus,
+      },
+    });
+
+    await member.save();
+    return res.status(200).json({
+      success: true,
+      message:
+        oldStatus === "Inactive" && memberStatus === "Active"
+          ? "Member reactivated with fresh cycle"
+          : "Member status updated",
+      member,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error updating member status",
+      error,
+    });
+  }
+};
+
+const extendMemberCycleController = async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({
+        success: false,
+        message: "Member not found",
+      });
+    }
+
+    const extendDays = Number(req.body.extendDays || 0);
+    if (!Number.isFinite(extendDays) || extendDays <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "extendDays must be greater than 0",
+      });
+    }
+
+    ensurePaymentCycles(member);
+    const currentCycle = getCurrentCycle(member);
+    if (!currentCycle?.endDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Current cycle not found",
+      });
+    }
+
+    const actor = await getActorFromRequest(req);
+    const oldEndDate = new Date(currentCycle.endDate);
+    const nextEndDate = new Date(oldEndDate);
+    nextEndDate.setDate(nextEndDate.getDate() + extendDays);
+    currentCycle.endDate = nextEndDate;
+
+    member.updatedBy = actor;
+    member.activityHistory.push({
+      action: "extend_cycle_days",
+      by: actor,
+      at: new Date(),
+      changes: {
+        extendDays,
+        from: oldEndDate,
+        to: nextEndDate,
+      },
+    });
+
+    syncMemberPaymentSummary(member);
+    await member.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Membership extended successfully",
+      member,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Error extending membership",
       error,
     });
   }
@@ -1073,8 +1518,8 @@ const getMemberDashboardController = async (req, res) => {
         joinedBuckets[key] = (joinedBuckets[key] || 0) + 1;
       }
 
-      const effectiveStartDate = m.startDate || m.createdAt;
-      const endDate = getEndDate(effectiveStartDate, m.duration);
+      const currentCycle = getCurrentCycle(m);
+      const endDate = currentCycle?.endDate ? new Date(currentCycle.endDate) : null;
       if (endDate && endDate >= now && endDate <= nextWeek) {
         stats.dueNextWeekCount += 1;
         if (stats.dueNextWeekMembers.length < 8) {
@@ -1190,6 +1635,9 @@ export {
   getMemberDashboardController,
   adjustMemberPaymentHistoryController,
   addMemberPaymentController,
+  extendMemberCycleController,
+  updateMemberStatusController,
+  restartMemberCycleController,
   uploadMemberProfileController,
   updateMemberPaymentStatusController,
   deleteMemberPaymentHistoryController,

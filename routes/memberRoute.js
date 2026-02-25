@@ -8,6 +8,9 @@ import {
   getMemberDashboardController,
   adjustMemberPaymentHistoryController,
   addMemberPaymentController,
+  extendMemberCycleController,
+  updateMemberStatusController,
+  restartMemberCycleController,
   uploadMemberProfileController,
   updateMemberPaymentStatusController,
   deleteMemberPaymentHistoryController,
@@ -82,6 +85,9 @@ router.post(
   isAdmin,
   addMemberPaymentController
 );
+router.post("/:id/extend", requireSignIn, isAdmin, extendMemberCycleController);
+router.put("/:id/status", requireSignIn, isAdmin, updateMemberStatusController);
+router.post("/:id/restart", requireSignIn, isAdmin, restartMemberCycleController);
 router.delete("/:id", requireSignIn, isAdmin, deleteMemberController);
 
 export default router;
