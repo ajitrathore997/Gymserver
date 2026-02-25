@@ -359,6 +359,14 @@ const getCurrentCycle = (member) => {
 
 const createMemberController = async (req, res) => {
   try {
+    const activationDate = req.body.activationDate || req.body.startDate;
+    if (!activationDate) {
+      return res.status(400).json({
+        success: false,
+        message: "activationDate is required",
+      });
+    }
+    const registrationDate = req.body.registrationDate || new Date();
     const fee = Number(req.body.fee || 0);
     const paidAmount = Number(req.body.paidAmount || 0);
     const paymentStatus =
@@ -380,6 +388,9 @@ const createMemberController = async (req, res) => {
 
     const member = new Member({
       ...req.body,
+      activationDate,
+      registrationDate,
+      startDate: activationDate,
       fee,
       paymentStatus,
       memberStatus: req.body.memberStatus || "Active",
@@ -519,16 +530,16 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
 
 
     if (startFrom || startTo) {
-      query.startDate = {};
+      query.activationDate = {};
       if (startFrom) {
         const start = parseRangeDate(startFrom, false);
-        if (start) query.startDate.$gte = start;
+        if (start) query.activationDate.$gte = start;
       }
       if (startTo) {
         const end = parseRangeDate(startTo, true);
-        if (end) query.startDate.$lte = end;
+        if (end) query.activationDate.$lte = end;
       }
-      if (!Object.keys(query.startDate).length) delete query.startDate;
+      if (!Object.keys(query.activationDate).length) delete query.activationDate;
     }
 
     const safeSortFields = new Set([
@@ -538,6 +549,8 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
       "paidAmount",
       "remainingAmount",
       "startDate",
+      "activationDate",
+      "registrationDate",
     ]);
     const sortField = safeSortFields.has(sortBy) ? sortBy : "createdAt";
     const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
@@ -561,11 +574,19 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
     const hydratedMembers = await Promise.all(
       members.map(async (m) => {
         ensurePaymentCycles(m);
+        if (!m.activationDate && m.startDate) {
+          m.activationDate = m.startDate;
+        }
+        if (!m.registrationDate && m.createdAt) {
+          m.registrationDate = m.createdAt;
+        }
         syncMemberPaymentSummary(m);
         if (m.isModified()) {
           await m.save();
         }
         const obj = m.toObject();
+        const activationDate = obj.activationDate || obj.startDate || null;
+        const registrationDate = obj.registrationDate || obj.createdAt || null;
         const history = Array.isArray(obj.paymentHistory) ? obj.paymentHistory : [];
         const lastPayment = history.length ? history[history.length - 1] : null;
         const currentCycle = getCurrentCycle(obj);
@@ -586,6 +607,8 @@ addRangeQuery(query, 'paidAmount', minPaid, maxPaid);
             : "Paid";
         return {
           ...obj,
+          activationDate,
+          registrationDate,
           lastPayment,
           expiryDate,
           isExpired,
@@ -645,6 +668,12 @@ const getMemberByIdController = async (req, res) => {
       });
     }
     ensurePaymentCycles(member);
+    if (!member.activationDate && member.startDate) {
+      member.activationDate = member.startDate;
+    }
+    if (!member.registrationDate && member.createdAt) {
+      member.registrationDate = member.createdAt;
+    }
     syncMemberPaymentSummary(member);
     await member.save();
     const cycles = member.paymentCycles || [];
@@ -724,6 +753,16 @@ const updateMemberController = async (req, res) => {
       member.membershipType,
       req.body.membershipType
     );
+    addIfChanged(
+      "registrationDate",
+      member.registrationDate,
+      req.body.registrationDate
+    );
+    addIfChanged(
+      "activationDate",
+      member.activationDate,
+      req.body.activationDate
+    );
     addIfChanged("startDate", member.startDate, req.body.startDate);
     addIfChanged("duration", member.duration, req.body.duration);
     addIfChanged(
@@ -750,7 +789,18 @@ const updateMemberController = async (req, res) => {
         }
       : null;
 
-    if (req.body.startDate !== undefined) member.startDate = req.body.startDate;
+    if (req.body.registrationDate !== undefined)
+      member.registrationDate = req.body.registrationDate;
+    if (req.body.activationDate !== undefined) {
+      member.activationDate = req.body.activationDate;
+      member.startDate = req.body.activationDate;
+    }
+    if (req.body.startDate !== undefined) {
+      member.startDate = req.body.startDate;
+      if (req.body.activationDate === undefined) {
+        member.activationDate = req.body.startDate;
+      }
+    }
     if (req.body.duration !== undefined) member.duration = req.body.duration;
     if (req.body.membershipType !== undefined)
       member.membershipType = req.body.membershipType;
@@ -1107,6 +1157,12 @@ const addMemberPaymentController = async (req, res) => {
     }
 
     ensurePaymentCycles(member);
+    if (!member.activationDate && member.startDate) {
+      member.activationDate = member.startDate;
+    }
+    if (!member.registrationDate && member.createdAt) {
+      member.registrationDate = member.createdAt;
+    }
     const actor = await getActorFromRequest(req);
     const paymentAt = req.body.date ? new Date(req.body.date) : new Date();
     if (Number.isNaN(paymentAt.getTime())) {
@@ -1239,6 +1295,7 @@ const startFreshMemberCycle = (member, options = {}) => {
   member.duration = nextDuration;
   member.fee = nextFee;
   member.startDate = startDate;
+  member.activationDate = startDate;
   member.memberStatus = "Active";
   member.reminderStatus = "None";
 
