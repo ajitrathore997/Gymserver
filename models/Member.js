@@ -247,6 +247,9 @@ const memberSchema = new mongoose.Schema(
       enum: ["Active", "Inactive"],
       default: "Active",
     },
+    inactiveSince: {
+      type: Date,
+    },
     reminderStatus: {
       type: String,
       enum: ["None", "Promised"],
