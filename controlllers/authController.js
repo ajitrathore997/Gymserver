@@ -104,6 +104,7 @@ const loginController = async (req, res) => {
                 city: user.city,
                 contact: user.contact,
                 role: user.role,
+                access: user.access,
                 _id: user._id,
             },
             token,

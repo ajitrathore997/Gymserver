@@ -1961,11 +1961,30 @@ const getMemberDashboardController = async (req, res) => {
       if (endDate && endDate >= now && endDate <= nextWeek) {
         stats.dueNextWeekCount += 1;
         if (stats.dueNextWeekMembers.length < 8) {
+          const historicalNonZeroFee = Array.isArray(m.paymentCycles)
+            ? [...m.paymentCycles]
+                .reverse()
+                .find((c) => Number(c?.fee || 0) > 0)
+            : null;
+          const resolvedFee = Math.max(
+            Number(currentCycle?.fee || 0),
+            Number(fee || 0),
+            Number(historicalNonZeroFee?.fee || 0)
+          );
+          const outstandingDueAmount = Number(remaining || 0);
+          const nextFeeAmount = Number(resolvedFee || 0);
+          const totalPayableAmount = outstandingDueAmount + nextFeeAmount;
           stats.dueNextWeekMembers.push({
             _id: m._id,
             name: m.name,
             phone: m.phone,
-            remainingAmount: remaining,
+            fee: nextFeeAmount,
+            remainingAmount: outstandingDueAmount,
+            outstandingDueAmount,
+            nextFeeAmount,
+            totalPayableAmount,
+            dueAmount: totalPayableAmount,
+            upcomingDueAmount: totalPayableAmount,
             endDate,
           });
         }

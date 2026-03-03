@@ -30,6 +30,11 @@ contact:{
 role:{
     type:Number,
     default:0
+},
+
+access: {
+    type:Number,
+    default:0
 }
 
 },{timestamps:true});
