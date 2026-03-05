@@ -921,6 +921,11 @@ const updateMemberController = async (req, res) => {
     );
     addIfChanged("memberStatus", member.memberStatus, req.body.memberStatus);
     addIfChanged("reminderStatus", member.reminderStatus, req.body.reminderStatus);
+    addIfChanged(
+      "promisedPaymentDate",
+      member.promisedPaymentDate,
+      req.body.promisedPaymentDate
+    );
     addIfChanged("fee", member.fee, fee, false);
     addIfChanged("paidAmount", existingPaid, desiredPaid, false);
 
@@ -1002,6 +1007,9 @@ const updateMemberController = async (req, res) => {
       member.memberStatus = req.body.memberStatus;
     if (req.body.reminderStatus !== undefined)
       member.reminderStatus = req.body.reminderStatus;
+    if (req.body.promisedPaymentDate !== undefined) {
+      member.promisedPaymentDate = req.body.promisedPaymentDate || null;
+    }
     if (req.body.paymentStatus !== undefined) {
       member.paymentStatus = req.body.paymentStatus;
     }
@@ -1859,9 +1867,27 @@ const getMemberDashboardController = async (req, res) => {
     const now = new Date();
     const nextWeek = new Date();
     nextWeek.setDate(now.getDate() + 7);
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(now);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    let todayExpenses = 0;
+    try {
+      const todayExpenseRows = await Expense.find({
+        date: { $gte: dayStart, $lte: dayEnd },
+      });
+      todayExpenses = todayExpenseRows.reduce(
+        (sum, e) => sum + Number(e.amount || 0),
+        0
+      );
+    } catch (_err) {
+      todayExpenses = 0;
+    }
 
     const stats = {
       totalMembers: scopedMembers.length,
+      activeMembersCount: 0,
       totalFee: 0,
       totalPaid: 0,
       totalRemaining: 0,
@@ -1884,6 +1910,20 @@ const getMemberDashboardController = async (req, res) => {
       expensesCountInRange,
       netInRange: 0,
       expenseSeries: [],
+      dailyClosure: {
+        date: dayStart.toISOString().slice(0, 10),
+        totalCollected: 0,
+        totalPaymentsCount: 0,
+        totalExpenses: todayExpenses,
+        net: 0,
+        collectedByMode: {
+          Cash: 0,
+          UPI: 0,
+          Card: 0,
+          "Bank Transfer": 0,
+          Other: 0,
+        },
+      },
     };
 
     const paymentBuckets = {};
@@ -1924,6 +1964,10 @@ const getMemberDashboardController = async (req, res) => {
         (overdueCycles > 0 ? overdueCycleFee * overdueCycles : 0);
       const isOverdue = overdueCycles > 0;
       const isPromised = m.reminderStatus === "Promised";
+      const isActiveMember = m.memberStatus === "Active";
+      if (isActiveMember) {
+        stats.activeMembersCount += 1;
+      }
 
       stats.totalFee += fee;
       stats.totalPaid += paid;
@@ -1955,6 +1999,24 @@ const getMemberDashboardController = async (req, res) => {
       if (joinedAt && !Number.isNaN(joinedAt.getTime())) {
         const key = joinedAt.toISOString().slice(0, 10);
         joinedBuckets[key] = (joinedBuckets[key] || 0) + 1;
+      }
+
+      const history = Array.isArray(m.paymentHistory) ? m.paymentHistory : [];
+      for (const p of history) {
+        if (p?.type !== "payment") continue;
+        const at = p?.at ? new Date(p.at) : null;
+        if (!at || Number.isNaN(at.getTime())) continue;
+        if (at < dayStart || at > dayEnd) continue;
+        const amount = Number(p.amount || 0);
+        stats.dailyClosure.totalCollected += amount;
+        stats.dailyClosure.totalPaymentsCount += 1;
+        const mode = ["Cash", "UPI", "Card", "Bank Transfer", "Other"].includes(
+          p.paymentMode
+        )
+          ? p.paymentMode
+          : "Other";
+        stats.dailyClosure.collectedByMode[mode] =
+          Number(stats.dailyClosure.collectedByMode[mode] || 0) + amount;
       }
 
       const endDate = currentCycle?.endDate ? new Date(currentCycle.endDate) : null;
@@ -2073,6 +2135,11 @@ const getMemberDashboardController = async (req, res) => {
     stats.netInRange = Number(stats.paidInRange || 0) - Number(stats.expensesInRange || 0);
     stats.totalDueNow = Number(stats.totalDueNow || 0);
     stats.promisedDueAmount = Number(stats.promisedDueAmount || 0);
+    stats.dailyClosure.totalCollected = Number(stats.dailyClosure.totalCollected || 0);
+    stats.dailyClosure.totalExpenses = Number(stats.dailyClosure.totalExpenses || 0);
+    stats.dailyClosure.net =
+      Number(stats.dailyClosure.totalCollected || 0) -
+      Number(stats.dailyClosure.totalExpenses || 0);
 
     stats.defaulters.sort((a, b) => Number(b.dueAmount || 0) - Number(a.dueAmount || 0));
     stats.defaulters = stats.defaulters.slice(0, 12);
