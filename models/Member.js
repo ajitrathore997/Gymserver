@@ -210,10 +210,6 @@ const memberSchema = new mongoose.Schema(
       type: String,
       default: "Basic",
     },
-    registrationDate: {
-      type: Date,
-      default: Date.now,
-    },
     activationDate: {
       type: Date,
     },

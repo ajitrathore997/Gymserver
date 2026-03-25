@@ -401,6 +401,25 @@ const getCurrentCycle = (member) => {
   return cycles.length ? cycles[cycles.length - 1] : null;
 };
 
+const getDueNowAmount = (member, now = new Date()) => {
+  const currentCycle = getCurrentCycle(member);
+  const storedRemaining = Number(member?.remainingAmount || 0);
+  const overdueCycles =
+    member?.memberStatus === "Active" && currentCycle
+      ? calculateOverdueCycles(currentCycle, now)
+      : 0;
+  const overdueCycleFee = Number((currentCycle?.fee ?? member?.fee) || 0);
+  const dueForExpiredPaidCycle =
+    member?.memberStatus === "Active" && overdueCycles > 0
+      ? overdueCycleFee * overdueCycles
+      : 0;
+
+  return {
+    currentCycle,
+    dueNowAmount: storedRemaining + dueForExpiredPaidCycle,
+  };
+};
+
 const calculateOverdueCycles = (cycle, now = new Date()) => {
   if (!cycle?.endDate) return 0;
   const endDate = new Date(cycle.endDate);
@@ -453,7 +472,6 @@ const createMemberController = async (req, res) => {
         message: "activationDate is required",
       });
     }
-    const registrationDate = req.body.registrationDate || new Date();
     const normalizedDuration = normalizeDuration(req.body.duration);
     const fee = Number(req.body.fee || 0);
     const paidAmount = Number(req.body.paidAmount || 0);
@@ -497,7 +515,6 @@ const createMemberController = async (req, res) => {
       ...req.body,
       duration: normalizedDuration || "1 Month",
       activationDate,
-      registrationDate,
       startDate: activationDate,
       fee,
       paymentStatus,
@@ -671,7 +688,6 @@ const getMembersController = async (req, res) => {
       "remainingAmount",
       "startDate",
       "activationDate",
-      "registrationDate",
     ]);
     const sortField = safeSortFields.has(sortBy) ? sortBy : "createdAt";
     const sortDir = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
@@ -698,33 +714,19 @@ const getMembersController = async (req, res) => {
         if (!m.activationDate && m.startDate) {
           m.activationDate = m.startDate;
         }
-        if (!m.registrationDate && m.createdAt) {
-          m.registrationDate = m.createdAt;
-        }
         syncMemberPaymentSummary(m);
         if (m.isModified()) {
           await m.save();
         }
         const obj = m.toObject();
         const activationDate = obj.activationDate || obj.startDate || null;
-        const registrationDate = obj.registrationDate || obj.createdAt || null;
+        const joinedDate = obj.createdAt || null;
         const history = Array.isArray(obj.paymentHistory) ? obj.paymentHistory : [];
         const lastPayment = history.length ? history[history.length - 1] : null;
-        const currentCycle = getCurrentCycle(obj);
+        const { currentCycle, dueNowAmount } = getDueNowAmount(obj, now);
         const expiryDate = currentCycle?.endDate || null;
         const expiry = expiryDate ? new Date(expiryDate) : null;
         const isExpired = expiry ? expiry < now : false;
-        const storedRemaining = Number(obj.remainingAmount || 0);
-        const overdueCycles =
-          obj.memberStatus === "Active" && currentCycle
-            ? calculateOverdueCycles(currentCycle, now)
-            : 0;
-        const overdueCycleFee = Number((currentCycle?.fee ?? obj.fee) || 0);
-        const dueForExpiredPaidCycle =
-          obj.memberStatus === "Active" && overdueCycles > 0
-            ? overdueCycleFee * overdueCycles
-            : 0;
-        const dueNowAmount = storedRemaining + dueForExpiredPaidCycle;
         const displayPaymentStatus =
           dueNowAmount > 0
             ? "Pending"
@@ -734,7 +736,7 @@ const getMembersController = async (req, res) => {
         return {
           ...obj,
           activationDate,
-          registrationDate,
+          joinedDate,
           lastPayment,
           expiryDate,
           isExpired,
@@ -769,6 +771,14 @@ const getMembersController = async (req, res) => {
       }
       return true;
     });
+
+    if (sortField === "remainingAmount") {
+      membersWithPayments.sort((a, b) => {
+        const aDue = Number(a.dueNowAmount || 0);
+        const bDue = Number(b.dueNowAmount || 0);
+        return sortDir === 1 ? aDue - bDue : bDue - aDue;
+      });
+    }
 
     const total = needsDerivedListFilter ? membersWithPayments.length : totalRaw;
     const pagedMembers = needsDerivedListFilter
@@ -806,31 +816,17 @@ const getMemberByIdController = async (req, res) => {
     if (!member.activationDate && member.startDate) {
       member.activationDate = member.startDate;
     }
-    if (!member.registrationDate && member.createdAt) {
-      member.registrationDate = member.createdAt;
-    }
     syncMemberPaymentSummary(member);
     refreshReminderState(member);
     await member.save();
     const cycles = member.paymentCycles || [];
-    const currentCycle = cycles.length ? cycles[cycles.length - 1] : null;
+    const { currentCycle, dueNowAmount } = getDueNowAmount(member, new Date());
     const totalOutstanding = cycles.reduce(
       (sum, c) => sum + Number(c.remainingAmount || 0),
       0
     );
     const expiryDate = currentCycle?.endDate || null;
     const isExpired = expiryDate ? new Date(expiryDate) < new Date() : false;
-    const storedRemaining = Number(member.remainingAmount || 0);
-    const overdueCycles =
-      member.memberStatus === "Active" && currentCycle
-        ? calculateOverdueCycles(currentCycle, new Date())
-        : 0;
-    const overdueCycleFee = Number((currentCycle?.fee ?? member.fee) || 0);
-    const dueForExpiredPaidCycle =
-      member.memberStatus === "Active" && overdueCycles > 0
-        ? overdueCycleFee * overdueCycles
-        : 0;
-    const dueNowAmount = storedRemaining + dueForExpiredPaidCycle;
     return res.status(200).json({
       success: true,
       member,
@@ -892,15 +888,11 @@ const updateMemberController = async (req, res) => {
     addIfChanged("name", member.name, req.body.name);
     addIfChanged("email", member.email, req.body.email);
     addIfChanged("phone", member.phone, req.body.phone);
+    addIfChanged("dob", member.dob, req.body.dob || null);
     addIfChanged(
       "membershipType",
       member.membershipType,
       req.body.membershipType
-    );
-    addIfChanged(
-      "registrationDate",
-      member.registrationDate,
-      req.body.registrationDate
     );
     addIfChanged(
       "activationDate",
@@ -919,6 +911,7 @@ const updateMemberController = async (req, res) => {
       member.assignedTrainer,
       req.body.assignedTrainer
     );
+    addIfChanged("profilePic", member.profilePic, req.body.profilePic);
     addIfChanged("memberStatus", member.memberStatus, req.body.memberStatus);
     addIfChanged("reminderStatus", member.reminderStatus, req.body.reminderStatus);
     addIfChanged(
@@ -938,8 +931,6 @@ const updateMemberController = async (req, res) => {
         }
       : null;
 
-    if (req.body.registrationDate !== undefined)
-      member.registrationDate = req.body.registrationDate;
     const oldActivationDate = member.activationDate
       ? new Date(member.activationDate)
       : member.startDate
@@ -993,6 +984,7 @@ const updateMemberController = async (req, res) => {
     if (req.body.name !== undefined) member.name = req.body.name;
     if (req.body.email !== undefined) member.email = req.body.email;
     if (req.body.phone !== undefined) member.phone = req.body.phone;
+    if (req.body.dob !== undefined) member.dob = req.body.dob || null;
     if (req.body.gender !== undefined) member.gender = req.body.gender;
     if (req.body.address !== undefined) member.address = req.body.address;
     if (req.body.emergencyName !== undefined)
@@ -1456,9 +1448,6 @@ const addMemberPaymentController = async (req, res) => {
     ensurePaymentCycles(member);
     if (!member.activationDate && member.startDate) {
       member.activationDate = member.startDate;
-    }
-    if (!member.registrationDate && member.createdAt) {
-      member.registrationDate = member.createdAt;
     }
     const actor = await getActorFromRequest(req);
     const paymentAt = req.body.date ? new Date(req.body.date) : new Date();
@@ -1993,9 +1982,7 @@ const getMemberDashboardController = async (req, res) => {
       const type = m.membershipType || "Other";
       stats.membershipTypeCounts[type] =
         (stats.membershipTypeCounts[type] || 0) + 1;
-      const joinedAt = m.registrationDate
-        ? new Date(m.registrationDate)
-        : (m.createdAt ? new Date(m.createdAt) : null);
+      const joinedAt = m.createdAt ? new Date(m.createdAt) : null;
       if (joinedAt && !Number.isNaN(joinedAt.getTime())) {
         const key = joinedAt.toISOString().slice(0, 10);
         joinedBuckets[key] = (joinedBuckets[key] || 0) + 1;

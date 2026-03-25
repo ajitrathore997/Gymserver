@@ -27,6 +27,7 @@ import feedBackRoute from "./routes/feedBackRoute.js";
 import memberRoute from "./routes/memberRoute.js";
 import expenseRoute from "./routes/expenseRoute.js";
 import inquiryRoute from "./routes/inquiryRoute.js";
+import supplementRoute from "./routes/supplementRoute.js";
 
 app.get("/", (req, res) =>{
 res.send("server is running successfully");
@@ -40,6 +41,7 @@ app.use("/api/v1/feedback", feedBackRoute);
 app.use("/api/v1/members", memberRoute);
 app.use("/api/v1/expenses", expenseRoute);
 app.use("/api/v1/inquiries", inquiryRoute);
+app.use("/api/v1/supplements", supplementRoute);
 
 
 const startServer = async () => {
