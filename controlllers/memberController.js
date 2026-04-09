@@ -2,7 +2,11 @@ import Member from "../models/Member.js";
 import { User } from "../models/User.js";
 import Expense from "../models/Expense.js";
 import fs from "fs/promises";
-import { isCloudinaryConfigured, uploadImageToCloudinary } from "../utils/cloudinary.js";
+import {
+  getOptimizedCloudinaryImageUrl,
+  isCloudinaryConfigured,
+  uploadImageToCloudinary,
+} from "../utils/cloudinary.js";
 
 const MONTH_ALLOCATION_POLICY =
   process.env.MONTH_ALLOCATION_POLICY === "calendar_month"
@@ -1142,7 +1146,8 @@ const uploadMemberProfileController = async (req, res) => {
       const uploadResult = await uploadImageToCloudinary(req.file.path, {
         folder: process.env.CLOUDINARY_MEMBER_FOLDER || process.env.CLOUDINARY_FOLDER || "gym-members",
       });
-      fileUrl = uploadResult.secure_url;
+      fileUrl =
+        getOptimizedCloudinaryImageUrl(uploadResult.public_id) || uploadResult.secure_url;
 
       try {
         await fs.unlink(req.file.path);

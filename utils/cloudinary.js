@@ -41,4 +41,18 @@ const uploadImageToCloudinary = async (filePath, options = {}) => {
   });
 };
 
-export { isCloudinaryConfigured, uploadImageToCloudinary };
+const getOptimizedCloudinaryImageUrl = (publicId, options = {}) => {
+  if (!publicId) return "";
+
+  return cloudinary.url(publicId, {
+    secure: true,
+    fetch_format: "auto",
+    quality: "auto:good",
+    width: 600,
+    height: 600,
+    crop: "limit",
+    ...options,
+  });
+};
+
+export { isCloudinaryConfigured, uploadImageToCloudinary, getOptimizedCloudinaryImageUrl };
