@@ -294,6 +294,7 @@ const getSupplementsDashboardController = async (req, res) => {
         acc.totalCollected += Number(sale.paidAmount || 0);
         acc.totalOutstanding += Number(sale.remainingAmount || 0);
         if (sale.paymentStatus === "Paid") acc.paidCount += 1;
+        if (sale.paymentStatus !== "Paid") acc.pendingSalesCount += 1;
         if (sale.paymentStatus === "Upcoming") acc.upcomingCount += 1;
         if (sale.paymentStatus === "No Due Date") acc.noDueDateCount += 1;
         if (sale.paymentStatus === "Overdue") acc.overdueCount += 1;
@@ -306,6 +307,7 @@ const getSupplementsDashboardController = async (req, res) => {
         totalCollected: 0,
         totalOutstanding: 0,
         paidCount: 0,
+        pendingSalesCount: 0,
         upcomingCount: 0,
         noDueDateCount: 0,
         overdueCount: 0,
@@ -318,8 +320,7 @@ const getSupplementsDashboardController = async (req, res) => {
       stats: {
         ...stats,
         recentPending: supplements
-          .filter((sale) => sale.paymentStatus !== "Paid")
-          .slice(0, 10),
+          .filter((sale) => sale.paymentStatus !== "Paid"),
       },
     });
   } catch (error) {
