@@ -89,20 +89,20 @@ const getSupplementView = (sale, now = new Date()) => {
   };
 };
 
-const buildSupplementQuery = ({ startDate, endDate, search, status }) => {
+const buildSupplementQuery = ({ startDate, endDate, search, status, pendingOnly }) => {
   const query = {};
 
   if (startDate || endDate) {
-    query.paymentDueDate = {};
+    query.buyDate = {};
     if (startDate) {
       const start = parseRangeDate(startDate, false);
-      if (start) query.paymentDueDate.$gte = start;
+      if (start) query.buyDate.$gte = start;
     }
     if (endDate) {
       const end = parseRangeDate(endDate, true);
-      if (end) query.paymentDueDate.$lte = end;
+      if (end) query.buyDate.$lte = end;
     }
-    if (!Object.keys(query.paymentDueDate).length) delete query.paymentDueDate;
+    if (!Object.keys(query.buyDate).length) delete query.buyDate;
   }
 
   if (search) {
@@ -116,6 +116,15 @@ const buildSupplementQuery = ({ startDate, endDate, search, status }) => {
 
   if (status === "No Due Date") {
     query.paymentDueDate = null;
+  }
+
+  if (pendingOnly === "true") {
+    query.$expr = {
+      $gt: [
+        { $subtract: [{ $ifNull: ["$totalAmount", 0] }, { $ifNull: ["$paidAmount", 0] }] },
+        0,
+      ],
+    };
   }
 
   return query;
@@ -170,15 +179,25 @@ const createSupplementController = async (req, res) => {
 
 const getSupplementsController = async (req, res) => {
   try {
-    const { startDate, endDate, search = "", status = "", page = 1, limit = 20 } = req.query;
-    const query = buildSupplementQuery({ startDate, endDate, search, status });
+    const {
+      startDate,
+      endDate,
+      search = "",
+      status = "",
+      pendingOnly = "false",
+      page = 1,
+      limit = 20,
+    } = req.query;
+    const query = buildSupplementQuery({ startDate, endDate, search, status, pendingOnly });
     const pageNum = Math.max(Number(page) || 1, 1);
     const limitNum = Math.min(Math.max(Number(limit) || 20, 1), 100);
 
-    const supplementsRaw = await SupplementSale.find(query).sort({ paymentDueDate: 1, createdAt: -1 });
+    const supplementsRaw = await SupplementSale.find(query).sort({ buyDate: -1, createdAt: -1 });
     let supplements = supplementsRaw.map((sale) => getSupplementView(sale));
-    if (status && !["No Due Date", ""].includes(status)) {
-      supplements = supplements.filter((sale) => sale.paymentStatus === status);
+    if (status && !["No Due Date", "", "Pending"].includes(status)) {
+      supplements = supplements.filter((sale) =>
+        sale.paymentStatus === status
+      );
     }
     const total = supplements.length;
     const skip = (pageNum - 1) * limitNum;
