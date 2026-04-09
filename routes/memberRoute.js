@@ -19,10 +19,15 @@ import { requireSignIn, isAdmin } from "../Middlewares/authMiddleware.js";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
+import * as dotenv from "dotenv";
+
+dotenv.config();
 
 const router = express.Router();
 
-const uploadDir = path.join(process.cwd(), "uploads");
+const uploadDir = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.join(process.cwd(), "uploads");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }

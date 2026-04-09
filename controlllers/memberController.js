@@ -1,6 +1,8 @@
 import Member from "../models/Member.js";
 import { User } from "../models/User.js";
 import Expense from "../models/Expense.js";
+import fs from "fs/promises";
+import { isCloudinaryConfigured, uploadImageToCloudinary } from "../utils/cloudinary.js";
 
 const MONTH_ALLOCATION_POLICY =
   process.env.MONTH_ALLOCATION_POLICY === "calendar_month"
@@ -1134,18 +1136,34 @@ const uploadMemberProfileController = async (req, res) => {
       });
     }
 
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
-    const fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+    let fileUrl = "";
+
+    if (isCloudinaryConfigured()) {
+      const uploadResult = await uploadImageToCloudinary(req.file.path, {
+        folder: process.env.CLOUDINARY_MEMBER_FOLDER || process.env.CLOUDINARY_FOLDER || "gym-members",
+      });
+      fileUrl = uploadResult.secure_url;
+
+      try {
+        await fs.unlink(req.file.path);
+      } catch (_error) {
+        // Keep upload flow successful even if temp-file cleanup fails.
+      }
+    } else {
+      const baseUrl = `${req.protocol}://${req.get("host")}`;
+      fileUrl = `${baseUrl}/uploads/${req.file.filename}`;
+    }
+
     return res.status(200).json({
       success: true,
       url: fileUrl,
       filename: req.file.filename,
     });
   } catch (error) {
+    console.error("Error uploading member profile:", error);
     return res.status(500).json({
       success: false,
-      message: "Error uploading file",
-      error,
+      message: error?.message || "Error uploading file",
     });
   }
 };
